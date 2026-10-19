@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import LocalePickerField from '../components/LocalePicker/LocalePickerField'
 import AuditLogTimeline, { type AuditLogEntry } from '../components/audit-log/AuditLogTimeline'
@@ -14,6 +14,7 @@ import WebhookRetryPanel, { type WebhookDelivery } from '../components/WebhookRe
 import DensityToggle from '../components/DensityToggle'
 import DirtyStateBanner from '../components/DirtyStateBanner'
 import { useDirtyForm, type SaveStatus } from '../hooks/useDirtyForm'
+import { validatePassword } from '../utils/passwordPolicy'
 
 // Tab definitions ordered by frequency of use
 const TABS = [
@@ -2573,6 +2574,10 @@ function SecurityPanel() {
   const registry = useDirtyRegistry();
   const [mfaMethod, setMfaMethod] = useState<MfaMethod | null>(null);
   const [sessions, setSessions] = useState(MOCK_SESSIONS);
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [confirmTouched, setConfirmTouched] = useState(false);
+  const passwordPolicyId = useId();
+  const confirmPasswordId = useId();
 
   const pwForm = useDirtyForm({
     storageKey: "veritasor_settings_security_draft",
@@ -2586,6 +2591,14 @@ function SecurityPanel() {
       void v;
     },
   });
+  const passwordPolicy = validatePassword(pwForm.values.newPassword);
+  const passwordsMatch = pwForm.values.newPassword === confirmPassword;
+  const showConfirmError = confirmTouched && !passwordsMatch;
+  const canSubmitPassword =
+    pwForm.isDirty &&
+    passwordPolicy.valid &&
+    passwordsMatch &&
+    pwForm.saveStatus !== "saving";
 
   useEffect(() => {
     registry.register("security", {
@@ -2611,6 +2624,8 @@ function SecurityPanel() {
 
   async function handlePwSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setConfirmTouched(true);
+    if (!passwordPolicy.valid || !passwordsMatch) return;
     await pwForm.save();
   }
 
@@ -2659,8 +2674,10 @@ function SecurityPanel() {
             <input
               id="new-password"
               type="password"
+              autoComplete="new-password"
               value={pwForm.values.newPassword}
               onChange={(e) => pwForm.setField("newPassword", e.target.value)}
+              aria-describedby={passwordPolicyId}
               style={{
                 padding: "0.6rem 0.8rem",
                 borderRadius: 8,
@@ -2671,9 +2688,56 @@ function SecurityPanel() {
               }}
             />
           </div>
+          <ul
+            id={passwordPolicyId}
+            style={{ margin: 0, paddingLeft: "1.25rem", color: "var(--muted)", fontSize: "0.85rem" }}
+            aria-label="Password requirements"
+          >
+            {passwordPolicy.failures.length > 0 ? (
+              passwordPolicy.failures.map((failure) => (
+                <li key={failure}>{failure}</li>
+              ))
+            ) : (
+              <li>Password meets all requirements.</li>
+            )}
+          </ul>
+          <div style={{ display: "grid", gap: "0.4rem" }}>
+            <label htmlFor="confirm-new-password" style={{ fontSize: "0.9rem", fontWeight: 600 }}>
+              Confirm new password
+            </label>
+            <input
+              id="confirm-new-password"
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                setConfirmTouched(true);
+              }}
+              aria-describedby={confirmPasswordId}
+              aria-invalid={showConfirmError ? "true" : undefined}
+              style={{
+                padding: "0.6rem 0.8rem",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface-strong)",
+                color: "var(--text)",
+                fontSize: "0.95rem",
+              }}
+            />
+            {showConfirmError ? (
+              <span id={confirmPasswordId} role="alert" style={{ color: "var(--danger)", fontSize: "0.85rem" }}>
+                Passwords do not match.
+              </span>
+            ) : (
+              <span id={confirmPasswordId} style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                Confirm your new password.
+              </span>
+            )}
+          </div>
           <button
             type="submit"
-            disabled={!pwForm.isDirty || pwForm.saveStatus === "saving"}
+            disabled={!canSubmitPassword}
             aria-busy={pwForm.saveStatus === "saving"}
             style={{
               alignSelf: "start",
@@ -2683,9 +2747,9 @@ function SecurityPanel() {
               background: "var(--accent)",
               color: "#04111f",
               fontWeight: 700,
-              cursor: !pwForm.isDirty || pwForm.saveStatus === "saving" ? "default" : "pointer",
+              cursor: canSubmitPassword ? "pointer" : "default",
               fontSize: "0.95rem",
-              opacity: !pwForm.isDirty || pwForm.saveStatus === "saving" ? 0.6 : 1,
+              opacity: canSubmitPassword ? 1 : 0.6,
               minHeight: "2.75rem",
             }}
           >
