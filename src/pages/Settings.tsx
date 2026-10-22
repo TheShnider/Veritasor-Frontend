@@ -165,7 +165,8 @@ function ProfilePanel() {
     });
     return () => registry.unregister("profile");
   }, [
-    registry,
+    registry.register,
+    registry.unregister,
     form.isDirty,
     form.saveStatus,
     form.lastSavedAt,
@@ -444,7 +445,8 @@ function NotificationsPanel() {
     });
     return () => registry.unregister("notifications");
   }, [
-    registry,
+    registry.register,
+    registry.unregister,
     form.isDirty,
     form.saveStatus,
     form.lastSavedAt,
@@ -2610,7 +2612,8 @@ function SecurityPanel() {
     });
     return () => registry.unregister("security");
   }, [
-    registry,
+    registry.register,
+    registry.unregister,
     pwForm.isDirty,
     pwForm.saveStatus,
     pwForm.lastSavedAt,
@@ -5412,41 +5415,58 @@ function leaveActionToText(action: LeaveAction): string {
 export default function Settings() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [entries, setEntries] = useState<Map<TabId, DirtyTabEntry>>(() => new Map());
+  const register = useCallback((tab: TabId, entry: DirtyTabEntry) => {
+    setEntries((current) => new Map(current).set(tab, entry));
+  }, []);
+  const unregister = useCallback((tab: TabId) => {
+    setEntries((current) => {
+      if (!current.has(tab)) return current;
+      const next = new Map(current);
+      next.delete(tab);
+      return next;
+    });
+  }, []);
+  const registry = useMemo<DirtyRegistryCtx>(
+    () => ({ entries, register, unregister }),
+    [entries, register, unregister],
+  );
+  const pageState = usePageDirtyState(registry);
+  const blocker = useBlocker(pageState.anyDirty);
   const [activeTab, setActiveTab] = useState<TabId>(() =>
     getTabFromHash(location.hash),
   );
-  const [pendingLeave, setPendingLeave] = useState<{ kind: string; target?: string } | null>(null);
-  const blocker = { state: 'unblocked' as const, reset: () => {} };
+  const [pendingLeave, setPendingLeave] = useState<LeaveAction | null>(null);
+  const [leaveSaveError, setLeaveSaveError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const sheetRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const srAnnounceRef = useRef<HTMLDivElement>(null);
   const prevFocusRef = useRef<HTMLElement | null>(null);
-  const registryRef = useRef<DirtyRegistryCtx>({
-    entries: new Map(),
-    register: () => {},
-    unregister: () => {},
-  });
-  const registry = registryRef.current;
-  const pageState = useMemo(() => ({
-    anyDirty: false,
-    dirtyTabs: [] as TabId[],
-    aggregateStatus: 'idle' as SaveStatus,
-    lastSavedAt: null as Date | null,
-    saveAll: async () => {},
-    discardAll: () => {},
-  }), []);
+  const cancelLeave = useCallback(() => {
+    setPendingLeave(null);
+    if (blocker.state === "blocked") blocker.reset();
+    setLeaveSaveError(null);
+  }, [blocker]);
 
   useEffect(() => {
     if (blocker.state === "blocked") {
-      setPendingLeave({ kind: "external" });
+      const nextLocation = blocker.location;
+      const target = nextLocation.pathname === location.pathname
+        ? getTabFromHash(nextLocation.hash)
+        : null;
+      setPendingLeave(
+        target && target !== activeTab
+          ? { kind: "tab", target }
+          : { kind: "external" },
+      );
       if (srAnnounceRef.current) {
         srAnnounceRef.current.textContent =
           "Warning: you have unsaved changes. A dialog is open to confirm leaving the page.";
       }
     }
-  }, [blocker.state]);
+  }, [blocker, location.pathname, activeTab]);
 
   useEffect(() => {
     if (pendingLeave !== null) {
@@ -5464,38 +5484,40 @@ export default function Settings() {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
-        setPendingLeave(null);
-        blocker.reset();
+        cancelLeave();
       }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [pendingLeave, blocker]);
-
-  const cancelLeave = useCallback(() => {
-    setPendingLeave(null);
-    blocker.reset();
-  }, [blocker]);
+  }, [pendingLeave, cancelLeave]);
 
   async function saveAllAndLeave(action: LeaveAction) {
+    setLeaveSaveError(null);
     try {
       await pageState.saveAll();
-    } catch {
-      // proceed regardless
+    } catch (error) {
+      setLeaveSaveError(
+        error instanceof Error ? error.message : "Unable to save your changes.",
+      );
+      return;
     }
     setPendingLeave(null);
-    blocker.proceed();
-    if (action.kind === "tab") {
+    if (blocker.state === "blocked") {
+      blocker.proceed();
+    } else if (action.kind === "tab") {
       setActiveTab(action.target);
       navigate(`/settings#${action.target}`, { replace: true });
     }
+    setLeaveSaveError(null);
   }
 
   function discardAndLeave(action: LeaveAction) {
     pageState.discardAll();
     setPendingLeave(null);
-    blocker.proceed();
-    if (action.kind === "tab") {
+    setLeaveSaveError(null);
+    if (blocker.state === "blocked") {
+      blocker.proceed();
+    } else if (action.kind === "tab") {
       setActiveTab(action.target);
       navigate(`/settings#${action.target}`, { replace: true });
     }
@@ -5887,6 +5909,11 @@ export default function Settings() {
                 ? "will be saved as a local draft and may be lost if you clear browser storage."
                 : "will remain as a local draft."}
             </p>
+            {leaveSaveError && (
+              <p role="alert" style={{ color: "var(--danger)", margin: "0 0 1rem" }}>
+                {leaveSaveError}
+              </p>
+            )}
             {dirtyTabLabels.length > 0 && (
               <ul
                 id="leave-warning-tabs"
